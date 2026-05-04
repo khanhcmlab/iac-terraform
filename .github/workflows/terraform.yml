@@ -1,0 +1,376 @@
+##############################################################################
+# .github/workflows/terraform.yml
+#
+# CI/CD pipeline for multi-environment Terraform deployments.
+#
+# Triggers
+# --------
+# • Pull Request  → terraform plan for the affected environment(s)
+# • Push to main  → terraform apply for dev
+# • Push to release/qa   → terraform apply for qa
+# • Push to release/prod → terraform apply for prod (requires manual approval)
+# • workflow_dispatch    → manually target any environment
+#
+# Authentication
+# --------------
+# Uses OpenID Connect (OIDC) to assume an AWS IAM Role – no long-lived keys.
+# Required GitHub Secrets (set per GitHub Environment):
+#   AWS_ROLE_TO_ASSUME  – ARN of the IAM role to assume via OIDC
+#   AWS_REGION          – AWS region (can also be env var, kept as secret for flexibility)
+#
+# State Backend
+# -------------
+# S3 bucket name & DynamoDB table are baked into each environment's backend.tf.
+# To override at runtime (e.g. different buckets per env) add:
+#   TF_BACKEND_BUCKET secret per GitHub Environment.
+##############################################################################
+
+name: Terraform CI/CD
+
+on:
+  push:
+    branches:
+      - main              # triggers dev apply
+      - release/qa        # triggers qa apply
+      - release/prod      # triggers prod apply (with manual gate)
+    paths:
+      - 'environments/**'
+      - 'modules/**'
+      - '.github/workflows/terraform.yml'
+
+  pull_request:
+    branches:
+      - main
+      - release/qa
+      - release/prod
+    paths:
+      - 'environments/**'
+      - 'modules/**'
+      - '.github/workflows/terraform.yml'
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment (dev | qa | prod)'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+      action:
+        description: 'Terraform action (plan | apply | destroy)'
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+
+# Prevent concurrent runs for the same ref to avoid state corruption.
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false   # never cancel in-progress apply; queue instead
+
+permissions:
+  id-token: write   # required for OIDC token request
+  contents: read
+  pull-requests: write  # allow posting plan output as PR comment
+
+##############################################################################
+# Reusable job that runs Terraform for a single environment.
+##############################################################################
+jobs:
+  # ---------------------------------------------------------------------------
+  # Determine which environments are affected so we only run what is needed.
+  # ---------------------------------------------------------------------------
+  detect-environments:
+    name: Detect Changed Environments
+    runs-on: ubuntu-latest
+    outputs:
+      run_dev:  ${{ steps.filter.outputs.dev }}
+      run_qa:   ${{ steps.filter.outputs.qa }}
+      run_prod: ${{ steps.filter.outputs.prod }}
+      action:   ${{ steps.set-action.outputs.action }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            dev:
+              - 'environments/dev/**'
+              - 'modules/**'
+            qa:
+              - 'environments/qa/**'
+              - 'modules/**'
+            prod:
+              - 'environments/prod/**'
+              - 'modules/**'
+
+      - name: Determine Terraform action
+        id: set-action
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "action=plan" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "action=${{ github.event.inputs.action }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "action=apply" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # DEV – auto-apply on push to main; plan on PRs targeting main.
+  # ---------------------------------------------------------------------------
+  terraform-dev:
+    name: Terraform / dev
+    needs: detect-environments
+    if: |
+      needs.detect-environments.outputs.run_dev == 'true' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      TF_WORKING_DIR: environments/dev
+      TF_VAR_FILE: terraform.tfvars
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.5"
+
+      - name: Terraform Format Check
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform Validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform plan \
+            -var-file="${{ env.TF_VAR_FILE }}" \
+            -input=false \
+            -out=tfplan \
+            -no-color 2>&1 | tee plan_output.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Post Plan to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('${{ env.TF_WORKING_DIR }}/plan_output.txt', 'utf8');
+            const maxLen = 65000;
+            const body = `### Terraform Plan – \`dev\`\n\`\`\`\n${plan.slice(0, maxLen)}\n\`\`\``;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+      - name: Terraform Apply
+        if: needs.detect-environments.outputs.action == 'apply' && github.event_name != 'pull_request'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Terraform Destroy
+        if: needs.detect-environments.outputs.action == 'destroy' && github.event_name == 'workflow_dispatch'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform destroy \
+            -var-file="${{ env.TF_VAR_FILE }}" \
+            -input=false \
+            -auto-approve
+
+  # ---------------------------------------------------------------------------
+  # QA – auto-apply on push to release/qa; plan on PRs targeting release/qa.
+  # ---------------------------------------------------------------------------
+  terraform-qa:
+    name: Terraform / qa
+    needs: detect-environments
+    if: |
+      needs.detect-environments.outputs.run_qa == 'true' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'qa')
+    runs-on: ubuntu-latest
+    environment: qa
+    env:
+      TF_WORKING_DIR: environments/qa
+      TF_VAR_FILE: terraform.tfvars
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.5"
+
+      - name: Terraform Format Check
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform Validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform plan \
+            -var-file="${{ env.TF_VAR_FILE }}" \
+            -input=false \
+            -out=tfplan \
+            -no-color 2>&1 | tee plan_output.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Post Plan to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('${{ env.TF_WORKING_DIR }}/plan_output.txt', 'utf8');
+            const maxLen = 65000;
+            const body = `### Terraform Plan – \`qa\`\n\`\`\`\n${plan.slice(0, maxLen)}\n\`\`\``;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+      - name: Terraform Apply
+        if: needs.detect-environments.outputs.action == 'apply' && github.event_name != 'pull_request'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Terraform Destroy
+        if: needs.detect-environments.outputs.action == 'destroy' && github.event_name == 'workflow_dispatch'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform destroy \
+            -var-file="${{ env.TF_VAR_FILE }}" \
+            -input=false \
+            -auto-approve
+
+  # ---------------------------------------------------------------------------
+  # PROD – requires manual approval via GitHub Environment protection rules.
+  # ---------------------------------------------------------------------------
+  terraform-prod:
+    name: Terraform / prod
+    needs: detect-environments
+    if: |
+      needs.detect-environments.outputs.run_prod == 'true' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod')
+    runs-on: ubuntu-latest
+    # The 'prod' GitHub Environment must have a "Required reviewers" protection
+    # rule configured in Settings → Environments → prod.
+    # The job will pause here and wait for approval before continuing.
+    environment: prod
+    env:
+      TF_WORKING_DIR: environments/prod
+      TF_VAR_FILE: terraform.tfvars
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.5"
+
+      - name: Terraform Format Check
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform Validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform plan \
+            -var-file="${{ env.TF_VAR_FILE }}" \
+            -input=false \
+            -out=tfplan \
+            -no-color 2>&1 | tee plan_output.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Post Plan to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('${{ env.TF_WORKING_DIR }}/plan_output.txt', 'utf8');
+            const maxLen = 65000;
+            const body = `### Terraform Plan – \`prod\`\n\`\`\`\n${plan.slice(0, maxLen)}\n\`\`\``;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+      - name: Terraform Apply
+        if: needs.detect-environments.outputs.action == 'apply' && github.event_name != 'pull_request'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Terraform Destroy
+        # Destroy in prod is only allowed via explicit workflow_dispatch.
+        if: needs.detect-environments.outputs.action == 'destroy' && github.event_name == 'workflow_dispatch'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform destroy \
+            -var-file="${{ env.TF_VAR_FILE }}" \
+            -input=false \
+            -auto-approve
