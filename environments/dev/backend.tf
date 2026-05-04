@@ -6,10 +6,10 @@
 
 terraform {
   backend "s3" {
-    bucket         = "khanhcmlab-dev-state-bucket"   # Replace with your bucket name
+    bucket         = "khanhcmlab-dev-state-bucket" # Replace with your bucket name
     key            = "dev/terraform.tfstate"
     region         = "us-east-1"
     encrypt        = true
-    dynamodb_table = "khanhcmlab-dev-state-lock"        # Replace with your table name
+    dynamodb_table = "khanhcmlab-dev-state-lock" # Replace with your table name
   }
 }
