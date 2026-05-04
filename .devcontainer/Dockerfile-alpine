@@ -1,0 +1,119 @@
+# Use Alpine Linux latest as base image
+FROM alpine:latest
+
+ARG DockerUSER=deww
+ARG DockerUID=503
+ARG DockerGID=20
+
+# Install basic dependencies and tools available in Alpine repositories
+# We enable community repository for some tools like starship, lazygit, neovim, etc.
+RUN echo "http://dl-cdn.alpinelinux.org/alpine/edge/community" >> /etc/apk/repositories && \
+    apk update && apk add --no-cache \
+    bash \
+    curl \
+    git \
+    sudo \
+    build-base \
+    linux-headers \
+    python3-dev \
+    libffi-dev \
+    openssl-dev \
+    vim \
+    jq \
+    unzip \
+    openssh \
+    shadow \
+    zsh \
+    starship \
+    lazygit \
+    fzf \
+    ripgrep \
+    fd \
+    tmux \
+    btop \
+    eza \
+    neovim \
+    github-cli \
+    kubectl \
+    helm \
+    libc6-compat \
+    python3 \
+    py3-pip \
+    go \
+    rust \
+    cargo \
+    nodejs \
+    npm \
+    uv
+
+# Install Gemini CLI & Copilot CLI
+# RUN npm install -g @google/gemini-cli @github/copilot
+
+# Setup user and group
+# Note: 'shadow' package provides useradd/groupadd if preferred, but Alpine native is adduser/addgroup.
+# We use shadow's useradd/groupadd for compatibility with the args or standard linux commands if installed,
+# otherwise use alpine native commands. Here we use shadow commands since we installed 'shadow'.
+RUN if getent passwd $DockerUID > /dev/null; then userdel -rf $(getent passwd $DockerUID | cut -d ':' -f 1); fi \
+    && groupadd --force --gid $DockerGID $DockerUSER \
+    && useradd --no-log-init --uid $DockerUID --gid $DockerGID -m -s /bin/zsh $DockerUSER \
+    && mkdir -p /etc/sudoers.d/ \
+    && echo "$DockerUSER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$DockerUSER \
+    && chmod 0440 /etc/sudoers.d/$DockerUSER
+
+USER $DockerUSER
+
+# Add .cargo/bin and .local/bin to PATH for uv and installed tools
+ENV PATH="/home/${DockerUSER}/.cargo/bin:/home/${DockerUSER}/.local/bin:$PATH"
+
+# Install Oh My Zsh
+RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended && \
+    git clone https://github.com/zsh-users/zsh-autosuggestions /home/${DockerUSER}/.oh-my-zsh/custom/plugins/zsh-autosuggestions && \
+    git clone https://github.com/lukechilds/zsh-nvm /home/${DockerUSER}/.oh-my-zsh/custom/plugins/zsh-nvm
+
+# Install manual tools not in apk or better handled manually
+# Terraform
+# RUN TERRAFORM_VERSION="1.8.1" && \
+#     ARCH=$(uname -m) && \
+#     if [ "$ARCH" = "x86_64" ]; then TF_ARCH="amd64"; else TF_ARCH="arm64"; fi && \
+#     curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${TF_ARCH}.zip" -o /tmp/terraform.zip && \
+#     sudo unzip /tmp/terraform.zip -d /usr/local/bin/ && \
+#     rm /tmp/terraform.zip
+
+# Kubectx/kubens
+RUN sudo curl -L https://github.com/ahmetb/kubectx/releases/latest/download/kubectx -o /usr/local/bin/kubectx && \
+    sudo chmod +x /usr/local/bin/kubectx && \
+    sudo curl -L https://github.com/ahmetb/kubectx/releases/latest/download/kubens -o /usr/local/bin/kubens && \
+    sudo chmod +x /usr/local/bin/kubens
+
+# Azure Kubelogin
+# RUN ARCH=$(uname -m) && \
+#     if [ "$ARCH" = "x86_64" ]; then KUBELOGIN_ARCH="amd64"; else KUBELOGIN_ARCH="arm64"; fi && \
+#     curl -L "https://github.com/Azure/kubelogin/releases/latest/download/kubelogin-linux-${KUBELOGIN_ARCH}.zip" -o /tmp/kubelogin.zip && \
+#     unzip /tmp/kubelogin.zip -d /tmp && \
+#     sudo mv "/tmp/bin/linux_${KUBELOGIN_ARCH}/kubelogin" /usr/local/bin/kubelogin && \
+#     sudo chmod +x /usr/local/bin/kubelogin && \
+#     rm -rf /tmp/kubelogin.zip /tmp/bin
+
+# Azure CLI via pip (official apk is often outdated or absent in main)
+# Note: Azure CLI can be heavy to build on Alpine due to dependencies (gcc, musl-dev, libffi-dev, openssl-dev).
+# We installed build-base and python3-dev (implied by python3 usually or added explicitly if needed).
+# Adding specific dev packages for azure-cli build if pip install fails.
+# Trying direct pip install.
+# RUN python3 -m venv /home/${DockerUSER}/.azure-cli-env && \
+#     /home/${DockerUSER}/.azure-cli-env/bin/pip install --no-cache-dir --upgrade pip && \
+#     /home/${DockerUSER}/.azure-cli-env/bin/pip install --no-cache-dir azure-cli && \
+#     sudo ln -s /home/${DockerUSER}/.azure-cli-env/bin/az /usr/local/bin/az
+
+# Install specify-cli (uv is installed via apk)
+# RUN uv tool install specify-cli --from git+https://github.com/github/spec-kit.git
+
+# NVM compatibility on Alpine is tricky because it relies on glibc prebuilt binaries for node.
+# Since we installed nodejs/npm via apk, we might skip nvm, OR use nvm with source compilation (slow).
+# The original dockerfile used nvm. Let's try to keep nvm but it might fail to run node unless we simple use system node.
+# Strategy: Use system node installed via apk as default. If user REALLY needs multiple versions, they might face issues on Alpine without gcompat.
+# We will set up nvm just in case, but rely on system node.
+ENV NVM_DIR="/home/${DockerUSER}/.nvm"
+RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+
+# Final shell
+CMD [ "zsh" ]

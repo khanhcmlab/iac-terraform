@@ -1,0 +1,26 @@
+# .devcontainer/docker-comspose.dev.yml
+version: '3.8'
+
+services:
+  devpod:
+    env_file:
+      - .env
+    build:
+      context: .
+      dockerfile: Dockerfile-alpine
+      args:
+        DockerUSER: ${CONTAINER_USER}
+        DockerUID: ${CONTAINER_UID}
+        DockerGID: ${CONTAINER_GID}
+    # image: dewwripper/devpod:alpine-0.0.1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker-host.sock
+      # # SSH
+      # - ${USERPROFILE}/.ssh:/home/${CONTAINER_USER}/.ssh:cached
+      # Local share folder
+      - ${USERPROFILE}/.local:/home/${CONTAINER_USER}/.local:cached
+      # Zsh history
+      - ${USERPROFILE}/.zsh_history:/home/${CONTAINER_USER}/.zsh_history:cached
+      # Home folder
+      - ../:/home/${CONTAINER_USER}/workspace
+    working_dir: /home/${CONTAINER_USER}/workspace
