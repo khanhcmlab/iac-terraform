@@ -40,3 +40,18 @@ module "vpc" {
   enable_nat_gateway   = var.enable_nat_gateway
   common_tags          = local.common_tags
 }
+
+module "kms_sops" {
+  source = "../../modules/kms_sops"
+
+  env          = var.env
+  project_name = var.project_name
+  common_tags  = local.common_tags
+
+  github_org         = var.github_org
+  github_repo        = var.github_repo
+  github_environment = var.env
+
+  key_administrator_principal_arns = var.kms_key_admin_principal_arns
+  sops_user_principal_arns         = var.sops_user_principal_arns
+}
