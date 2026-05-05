@@ -1,0 +1,40 @@
+################################################################################
+# .sops.yaml
+#
+# SOPS creation rules.  Each rule maps a file-path pattern to the KMS key for
+# the matching environment.  Rules are evaluated in order; the first match wins.
+#
+# Replace <AWS_ACCOUNT_ID> with your 12-digit AWS account ID.
+# The alias ARNs are stable – they automatically follow the underlying key even
+# after rotation.
+#
+# Naming convention: <project>-<service>-<env>.enc.yaml
+# Examples:
+#   environments/prod/database.enc.yaml
+#   environments/qa/app-config.enc.env
+#   environments/dev/third-party-api.enc.json
+################################################################################
+
+creation_rules:
+  ##############################################################################
+  # prod  – strict: only the prod KMS key can decrypt
+  ##############################################################################
+  - path_regex: ^environments/prod/.*\.enc\.(yaml|yml|json|env)$
+    kms: arn:aws:kms:us-east-1:<AWS_ACCOUNT_ID>:alias/iac-demo/sops/prod
+    # Selectively encrypt only leaf keys that contain secret data;
+    # non-secret keys (names, labels) stay readable for code review.
+    encrypted_regex: "^(data|stringData|secrets|values|password|passwd|token|secret|apiKey|api_key|accessKey|access_key|privateKey|private_key)$"
+
+  ##############################################################################
+  # qa  – isolated key; prod OIDC role has no access to this key
+  ##############################################################################
+  - path_regex: ^environments/qa/.*\.enc\.(yaml|yml|json|env)$
+    kms: arn:aws:kms:us-east-1:<AWS_ACCOUNT_ID>:alias/iac-demo/sops/qa
+    encrypted_regex: "^(data|stringData|secrets|values|password|passwd|token|secret|apiKey|api_key|accessKey|access_key|privateKey|private_key)$"
+
+  ##############################################################################
+  # dev  – isolated key; broadest developer access for fast iteration
+  ##############################################################################
+  - path_regex: ^environments/dev/.*\.enc\.(yaml|yml|json|env)$
+    kms: arn:aws:kms:us-east-1:<AWS_ACCOUNT_ID>:alias/iac-demo/sops/dev
+    encrypted_regex: "^(data|stringData|secrets|values|password|passwd|token|secret|apiKey|api_key|accessKey|access_key|privateKey|private_key)$"

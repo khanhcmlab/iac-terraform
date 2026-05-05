@@ -13,3 +13,11 @@ availability_zones   = ["us-east-1a", "us-east-1b"]
 
 # NAT Gateway enabled in qa to mirror prod closer
 enable_nat_gateway = true
+
+# GitHub OIDC configuration for SOPS KMS IAM role
+github_org  = "khanhcmlab"
+github_repo = "iac-terraform"
+
+# Optional: add developer/admin ARNs for local SOPS access
+# kms_key_admin_principal_arns = []
+# sops_user_principal_arns     = []

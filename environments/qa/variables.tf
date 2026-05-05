@@ -43,3 +43,24 @@ variable "enable_nat_gateway" {
   type        = bool
   default     = true
 }
+variable "github_org" {
+  description = "GitHub organisation that owns this repository"
+  type        = string
+}
+
+variable "github_repo" {
+  description = "GitHub repository name (without the org prefix)"
+  type        = string
+}
+
+variable "kms_key_admin_principal_arns" {
+  description = "IAM principal ARNs that may administer the SOPS KMS key"
+  type        = list(string)
+  default     = []
+}
+
+variable "sops_user_principal_arns" {
+  description = "IAM principal ARNs allowed to encrypt/decrypt with SOPS locally"
+  type        = list(string)
+  default     = []
+}
